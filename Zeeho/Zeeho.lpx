@@ -1,0 +1,25 @@
+#!name=Zeeho_Checkin
+#!desc=每日签到+盲盒抽奖+发动态+点赞+评论+分享+自动清理+积分查询；今日已完成的发帖/点赞/分享自动跳过，可安全重复运行；get_cookie 开关控制Cookie抓取，full_task 开关切换全部任务/仅查询
+#!author=ZahicX
+#!tag=签到
+#!type=normal
+#!system=iOS,iPadOS
+#!icon=https://raw.githubusercontent.com/ZahicX/Script/main/icon/zeeho.png
+#!date==2026-09-08
+
+[Argument]
+get_cookie = switch,false,tag=获取Cookie,desc=开启后进入 App「我的」页面即自动抓取 Cookie；抓完建议关闭
+run_cron = switch,true,tag=启用定时任务,desc=总开关：关闭后 cron 完全不运行；开启后按下方「执行全部任务」决定范围
+full_task = switch,true,tag=执行全部任务,desc=开启=签到/抽奖/发布/点赞/评论/分享/删除+积分查询（今日已完成的发帖/点赞/分享会自动跳过，重复运行安全）；关闭=仅查询积分与签到天数，不发起任何动作
+cron_time = input,"7 0 * * *",tag=任务 Cron 表达式,desc=默认每天 00:07 执行，可自行错峰修改
+debug_mode = switch,false,tag=调试模式,desc=开启后日志包含每个接口的原始响应 JSON
+
+[Script]
+# 1) 获取 Cookie（受 get_cookie 开关控制，默认关闭；开启后打开 App「我的」页面触发抓取）
+http-response ^https:\/\/tapi\.zeehoev\.com\/v1\.0\/mine\/cfmotoservermine\/setting script-path=https://raw.githubusercontent.com/ZahicX/Script/main/Zeeho/Zeeho_Checkin.js, requires-body=true, timeout=60, tag=极核Cookie, enable={get_cookie}
+
+# 2) 定时任务（run_cron 控制 cron 是否运行；full_task 控制执行全部任务还是仅查询。注意：cron 表达式不能加引号）
+cron {cron_time} script-path=https://raw.githubusercontent.com/ZahicX/Script/main/Zeeho/Zeeho_Checkin.js, timeout=300, tag=极核全任务, enable={run_cron}, argument=[{full_task},{debug_mode}]
+
+[Mitm]
+hostname = tapi.zeehoev.com
