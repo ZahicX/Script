@@ -1,9 +1,9 @@
 /*
-Date: 2026年9月9日00:44:30
+Date: 2026年9月9日01:57:23
 new Env('极核-ZEEHO');
 @Author: ZahicX 极核全任务（双网关签名 + 真机UA优先版）
 @Description: 每日签到 + 盲盒抽奖 + 发布打卡动态 + 点赞 + 评论 + 分享 + 自动清理动态 + 积分查询
-@Workflow: 签到 → 查签到记录(满30天领盲盒) → 查今日任务状态(已做则跳过) → 发动态 → 取动态ID → 点赞 → 评论 → 分享 → 删除动态(仅删本次所发) → 查总积分
+@Workflow: 签到 → 查签到记录(满30天领盲盒) → 查今日任务状态(已做则跳过) → 发动态 → 取动态ID → 点赞 → 分享 → 删除动态(仅删本次所发) → 查总积分（评论任务默认关闭，POST_COMMENT=true 开启）
 @Gateway: 签到/抽奖/积分走 H5 网关(h5.zeehoev.com)，社区动态走原生网关(tapi.zeehoev.com)，双签名体系
 @Compat: Loon / Egern（Egern 以 Surge 兼容模式运行），另兼容 Surge / QX / Stash / NR / Node.js
 
@@ -80,7 +80,9 @@ if (typeof $argument === 'object' && $argument) {
 let RUN_TASK = true;
 // Loon 3.5 传布尔值 true/false，旧版/其他环境可能传字符串 'true'，两者都要兼容
 if (pluginArg.full_task !== undefined) RUN_TASK = (pluginArg.full_task === true || pluginArg.full_task === 'true');
-// 🔍 调试开关（不常用）：先初始化，再由插件参数覆盖（这两行顺序不可颠倒）
+// ⚙️ 评论任务开关：false = 默认不执行评论（实测发帖后可直接分享得积分，评论并非分享前置条件）
+let POST_COMMENT = false;
+// ⚙️ 调试开关（不常用）：先初始化，再由插件参数覆盖（这两行顺序不可颠倒）
 $.is_debug = ($.isNode() ? process.env.IS_DEBUG : $.getdata('zeeho_is_debug')) || 'false';
 if (pluginArg.debug_mode === true || pluginArg.debug_mode === 'true') $.is_debug = 'true';
 $.notifySummary = [];   // 全局汇总通知行
@@ -131,7 +133,7 @@ async function main() {
           const likeDone = isToday(taskList.find(t => t.code === '1026')?.createDate);
 
           if (postDone && likeDone && shareDone) {
-            $.log(`ℹ️ 今日发帖/点赞/分享任务均已完成，跳过动态任务\n`);
+            $.log(`ℹ️ 今日发帖/点赞/分享任务均已完成，跳过动态任务`);
           } else {
             // 5. 发帖（仅今日未发帖时；保留随机内容）
             let postId = null;
@@ -167,8 +169,8 @@ async function main() {
                 $.log(`ℹ️ 今日已点赞，跳过点赞任务`);
               }
 
-              // 8. 评论（评论不加分，但分享前必须有评论）
-              if (!shareDone) {
+              // 8. 评论（默认关闭：实测发帖后可直接分享得积分；如需评论改 POST_COMMENT = true）
+              if (POST_COMMENT && !shareDone) {
                 await $.wait(user.getRandomTime());
                 await user.comment(postId);
               }
@@ -218,13 +220,15 @@ async function main() {
         count = record?.count || 0;
       }
       if (RUN_TASK) {
-        // 汇总式：旧分 + 本次获得（gain 按实际成功任务计）
-        const gain = Number(integral) + Number(integralScore) + interactGain;
+        // 汇总式：当前总分 (旧分 签到X 任务Y)；签到项=签到得分+盲盒抽奖，任务项=发帖/点赞/分享
+        const signGain = Number(integral) + Number(integralScore);
+        const gain = signGain + interactGain;
         const oldScore = typeof score === 'number' ? score - gain : '未知';
         $.log(`📱[${user.userName || user.index}] 当前积分: ${score ?? '未知'} 分, 累计签到: ${count || '未知'} 天`);
-        $.notifySummary.push(`「${user.userName || user.index}」积分: ${oldScore}+${gain}, 累签: ${count}天`);
+        $.notifySummary.push(`📱[${user.userName || user.index}] 积分: ${score ?? '未知'} (${oldScore} 签到${signGain} 任务${interactGain}), 累计签到: ${count || '未知'} 天`);
         $.successCount++;
       } else {
+        $.log(`📱[${user.userName || user.index}] 当前积分: ${score ?? '未知'} 分, 累计签到: ${count || '未知'} 天`);
         $.notifySummary.push(`「${user.userName || user.index}」当前积分: ${score ?? '未知'} 分, 累计签到: ${count || '未知'} 天`);
         if (score != null) $.successCount++; else $.failCount++;
       }
