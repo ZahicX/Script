@@ -1,9 +1,9 @@
 /*
-Date: 2026年9月9日01:57:23
+Date: 2026年9月11日03:21:19
 new Env('极核-ZEEHO');
 @Author: ZahicX 极核全任务（双网关签名 + 真机UA优先版）
 @Description: 每日签到 + 盲盒抽奖 + 发布打卡动态 + 点赞 + 评论 + 分享 + 自动清理动态 + 积分查询
-@Workflow: 签到 → 查签到记录(满30天领盲盒) → 查今日任务状态(已做则跳过) → 发动态 → 取动态ID → 点赞 → 分享 → 删除动态(仅删本次所发) → 查总积分（评论任务默认关闭，POST_COMMENT=true 开启）
+@Workflow: 签到 → 查签到记录(满30天且今日未抽则领盲盒) → 查今日任务状态(已做则跳过) → 发动态 → 取动态ID → 点赞 → 分享 → 删除动态(仅删本次所发) → 查总积分（评论任务默认关闭，POST_COMMENT=true 开启）
 @Gateway: 签到/抽奖/积分走 H5 网关(h5.zeehoev.com)，社区动态走原生网关(tapi.zeehoev.com)，双签名体系
 @Compat: Loon / Egern（Egern 以 Surge 兼容模式运行），另兼容 Surge / QX / Stash / NR / Node.js
 
@@ -119,10 +119,14 @@ async function main() {
           const record = await user.getSignRecord();
           count = record?.count || 0;
 
-          // 3. 盲盒抽奖（新逻辑：本月累计签到满 30 天时领取盲盒奖励）
+          // 3. 盲盒抽奖（满 30 天触发；先查中奖记录，今日已抽则跳过）
           if (count === 30) {
             await $.wait(user.getRandomTime());
-            integralScore = (await user.lottery()) || 0;
+            if (await user.hasLotteryToday() === true) {
+              $.log(`ℹ️ 盲盒抽奖: 今日盲盒已抽取，跳过`);
+            } else {
+              integralScore = (await user.lottery()) || 0;
+            }
           }
 
           // 4. 查询今日任务完成情况（发帖1023 / 分享1024 / 点赞1026），已做的跳过
@@ -365,22 +369,52 @@ class UserInfo {
     }
   }
 
-  // 盲盒抽奖（任务3，累计签到满30天领取；H5 优先，失败回退原生网关）
-  async lottery() {
+  // 查询中奖记录，判断今天是否已抽过盲盒（true=已抽，false=未抽，null=查询失败）
+  async hasLotteryToday() {
     try {
-      const date = new Date();
-      const today = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      const d = new Date();
+      const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const q = `page=1&pageSize=10`;
       let res = await this.fetch({
-        url: `https://h5.zeehoev.com/cfmotoservermine/signin/supplementPrize?supplementDate=${today}`,
+        url: `https://h5.zeehoev.com/cfmotoservermine/signin/prizesDetail?${q}`,
         type: "get",
-        headers: getSign("h5", `supplementDate=${today}`),
+        headers: getSign("h5", q),
         dataType: "json"
       });
-      if (res?.code != '10000') {
-        $.log(`⚠️ 盲盒抽奖: H5 网关未成功，回退原生网关`);
-        const q = `supplementDate=${today}`;
+      // 仅「无响应」才回退原生网关；业务错误视为查询失败，交由抽奖流程处理
+      if (res == null) {
         res = await this.fetch({
-          url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/supplementPrize?${q}`,
+          url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/prizesDetail?${q}`,
+          type: "get",
+          headers: getSign("native", q),
+          dataType: "json"
+        });
+      }
+      if (res?.code == '10000' && Array.isArray(res?.data)) {
+        return res.data.some(p => p.createDate === today);
+      }
+      return null;
+    } catch (e) {
+      $.log(`⚠️ 查询中奖记录失败: ${e.message || e}`);
+      return null;
+    }
+  }
+
+  // 盲盒抽奖（任务3，满30天且今日未抽时领取；H5 优先，失败回退原生网关）
+  async lottery() {
+    try {
+      const q = `boxType=0&version=v2`;
+      let res = await this.fetch({
+        url: `https://h5.zeehoev.com/cfmotoservermine/signin/lottery?${q}`,
+        type: "get",
+        headers: getSign("h5", q),
+        dataType: "json"
+      });
+      // 仅「无响应」（网关/网络故障）才回退原生网关；业务错误（code≠10000）直接终止，避免误报与重复请求
+      if (res == null) {
+        $.log(`⚠️ 盲盒抽奖: H5 网关无响应，回退原生网关`);
+        res = await this.fetch({
+          url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/lottery?${q}`,
           type: "get",
           headers: getSign("native", q),
           dataType: "json"
