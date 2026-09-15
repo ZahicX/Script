@@ -1,0 +1,32 @@
+#!name = 徕芬签到
+#!desc = 徕芬 App 每日签到,支持自动捕获 Token 与定时签到(旧版语法)
+#!author = ZahicX
+#!icon = https://raw.githubusercontent.com/ZahicX/Script/main/icon/laifen.png
+#!system = iOS,iPadOS,tvOS,macOS
+#!tag = 签到,工具
+#!type = normal
+#!date = 2026年9月16日04:08:42
+
+# ---------------------------------------------------------------
+# [Argument] 参数
+#   token_switch: 捕获 Token 开关,默认打开
+#   cron_switch:  定时签到开关,默认关闭
+#   cron_expr:    Cron 表达式,可自由修改签到时间
+# ---------------------------------------------------------------
+[Argument]
+token_switch = switch,true,tag=获取Token,desc=打开后,在 App 内打开签到页即自动捕获/更新 Token(需配合 MITM)
+cron_switch = switch,false,tag=Cron签到,desc=打开后,按下方 Cron 时间自动遍历已捕获账户执行签到
+cron_expr = input,"10 00 * * *",tag=Cron签到时间,desc=Cron 表达式(分 时 日 月 周),如 "10 00 * * *" 表示每天 00:10,"0 9 * * *" 表示每天 9:00;格式错误则定时任务不执行
+
+[Script]
+# Token 捕获:命中签到活动查询请求时,把 authorization 存入 $persistentStore(key=laifen_token)
+http-request ^https://mall-gw\.laifen\.net/mall_marketing/sc/activity/sign/current script-path=https://raw.githubusercontent.com/ZahicX/Script/main/Laifen/laifen_checkin.js,timeout=10,enable={token_switch},tag=徕芬签到Token捕获
+
+# 定时签到:按 cron_expr 参数指定的时间执行,遍历所有已捕获账户依次签到,汇总为一条通知
+cron {cron_expr} script-path=https://raw.githubusercontent.com/ZahicX/Script/main/Laifen/laifen_checkin.js,timeout=300,enable={cron_switch},tag=徕芬定时签到
+
+# ---------------------------------------------------------------
+# [Mitm] HTTPS 必须解密,否则 Token 捕获规则不生效
+# ---------------------------------------------------------------
+[Mitm]
+hostname = mall-gw.laifen.net
