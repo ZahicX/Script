@@ -1,11 +1,12 @@
 /*
-Date: 2026年9月16日03:52:41
+Date: 2026年9月18日01:52:30
 Author: ZahicX
 徕芬 Laifen App 每日签到 - Loon 脚本(支持多账户,最多 5 个)
 接口来源:抓包记录 mall-gw.laifen.net
   - GET  /mall_marketing/sc/activity/sign/current  查询签到活动(含 activityId、当月日历)
   - POST /mall_marketing/sc/activity/sign/do       执行签到 body {"activityId":3}
   - GET  /mall_user/user/ma/user_detail_info       查询用户信息(昵称)
+  - GET  /mall_user/sc/member/info                 查询会员信息(data.availablePoint 总积分)
 
 [Script] 配置:
   # 脚本图标: https://raw.githubusercontent.com/ZahicX/Script/main/icon/laifen.png
@@ -138,6 +139,31 @@ Author: ZahicX
     );
   }
 
+  // ---------- 连续签到奖励 ----------
+  // 活动规则:同一自然月周期内连续签到满 5 天,额外奖励 5 积分(服务器自动发放,每周期仅计 1 次)
+  // 仅在达成当天(连续第 5 天)追加提示,其他天数按原格式显示
+  const STREAK_GOAL = 5;
+  const STREAK_BONUS = 5;
+  function streakInfo(days) {
+    if (days === STREAK_GOAL) return `(连续签到${STREAK_GOAL}天，奖励${STREAK_BONUS}积分)`;
+    return "";
+  }
+
+  // ---------- 总积分 ----------
+  // GET /mall_user/sc/member/info 返回 data.availablePoint(当前可用总积分),失败回调 null
+  function fetchTotalPoint(token, cb) {
+    http(
+      { url: `${BASE}/mall_user/sc/member/info`, method: "GET", headers: headers(token) },
+      (_err, _resp, data) => {
+        if (data && data.success && data.data && data.data.availablePoint != null) {
+          cb(data.data.availablePoint);
+        } else {
+          cb(null);
+        }
+      }
+    );
+  }
+
   // ---------- 单账户签到 ----------
   // 完成回调 done(resultText),resultText 为签到结果描述
   function signAccount(acc, done) {
@@ -155,7 +181,11 @@ Author: ZahicX
         const d = data.data;
         const today = (d.calendarList || []).find((x) => x.date === todayStr());
         if (today && today.status === 1) {
-          return done(nick, `已签到 ${d.continuousDays} 天(今日已签到)`);
+          const s = streakInfo(d.continuousDays);
+          const txt = `已签到 ${d.continuousDays} 天(今日已签到)${s}`;
+          return fetchTotalPoint(token, (total) =>
+            done(nick, total != null ? `${txt}\nLaifen总积分：${total} 积分` : txt)
+          );
         }
         http(
           {
@@ -171,9 +201,10 @@ Author: ZahicX
             if (data2.success && data2.code === "00000") {
               const r = data2.data || {};
               const days = r.continuousDays != null ? r.continuousDays : d.continuousDays;
-              return done(
-                nick,
-                `成功 已签到 ${days} 天,获得 ${r.rewardValue || d.dailyRewardValue || 1} 积分`
+              const s = streakInfo(days);
+              const txt = `成功 已签到 ${days} 天,获得 ${r.rewardValue || d.dailyRewardValue || 1} 积分${s}`;
+              return fetchTotalPoint(token, (total) =>
+                done(nick, total != null ? `${txt}\nLaifen总积分：${total} 积分` : txt)
               );
             }
             done(nick, `失败(${data2.code}: ${data2.msg || "未知错误"})`);
