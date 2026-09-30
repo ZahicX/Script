@@ -1,0 +1,32 @@
+#!name = 天翼云盘签到
+#!desc = 天翼云盘(绿色任务)每日签到,支持自动捕获凭证与定时签到
+#!author = ZahicX
+#!icon = https://raw.githubusercontent.com/ZahicX/Script/main/icon/189cloud.png
+#!system = iOS,iPadOS,tvOS,macOS
+#!tag = 签到,工具
+#!type = normal
+#!date = 2026年9月30日17:36:03
+
+# ---------------------------------------------------------------
+# [Argument] 参数
+#   token_switch: 捕获凭证开关,默认打开
+#   cron_switch:  定时签到开关,默认关闭
+#   cron_expr:    Cron 表达式,可自由修改签到时间
+# ---------------------------------------------------------------
+[Argument]
+token_switch = switch,true,tag=获取凭证,desc=打开后,在 App 内打开绿色任务页即自动捕获/更新凭证(需配合 MITM)
+cron_switch = switch,false,tag=Cron签到,desc=打开后,按下方 Cron 时间自动遍历已捕获账户执行签到
+cron_expr = input,"30 08 * * *",tag=Cron签到时间,desc=Cron 表达式(分 时 日 月 周),如 "30 08 * * *" 表示每天 08:30,"30 00 * * *" 表示每天 00:30;格式错误则定时任务不执行
+
+[Script]
+# 凭证捕获:命中签到天数查询请求时,把 sessionKey 与登录 Cookie 存入 $persistentStore(key=189cloud_accounts)
+http-request ^https://m\.cloud\.189\.cn/market/signInNewInfo\.action script-path=https://raw.githubusercontent.com/ZahicX/Script/main/189Cloud/189cloud_checkin.js,timeout=10,enable={token_switch},tag=天翼云盘凭证捕获
+
+# 定时签到:按 cron_expr 参数指定的时间执行,遍历所有已捕获账户依次签到,汇总为一条通知
+cron {cron_expr} script-path=https://raw.githubusercontent.com/ZahicX/Script/main/189Cloud/189cloud_checkin.js,timeout=300,enable={cron_switch},tag=天翼云盘定时签到
+
+# ---------------------------------------------------------------
+# [Mitm] HTTPS 必须解密,否则凭证捕获规则不生效
+# ---------------------------------------------------------------
+[Mitm]
+hostname = m.cloud.189.cn
