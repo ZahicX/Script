@@ -1,11 +1,11 @@
 #!name = 国家电网签到金
-#!desc = 网上国网(95598)签到金每日签到,自动捕获凭证、内置国密解密,通知展示账号昵称/今日签到金/连签天数/总额
+#!desc = 网上国网(95598)签到金每日签到,自动捕获凭证、内置国密解密,通知展示账号昵称/今日签到金/连签天数/总额,累计签到达档位自动抽奖
 #!author = ZahicX
 #!icon = https://raw.githubusercontent.com/ZahicX/Script/main/icon/sgcc.png
 #!system = iOS,iPadOS,tvOS,macOS
 #!tag = 签到,工具
 #!type = normal
-#!date = 2026年10月2日23:54:02
+#!date = 2026年10月9日01:34:33
 
 # ---------------------------------------------------------------
 # [Argument] 参数

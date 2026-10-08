@@ -1,21 +1,27 @@
 /*
-Date: 2026年10月2日23:54:02
+Date: 2026年10月9日01:34:33
 Author: ZahicX
-国家电网(网上国网 95598) 签到金每日签到 - Loon 脚本(支持多账户,最多 5 个) v2
+国家电网(网上国网 95598) 签到金每日签到 - Loon 脚本(支持多账户,最多 5 个) v3
 接口来源:抓包记录 csc-service.sgcc.com.cn:28630(网上国网 App,签到活动 ACT20208020/H5 包 V00000419)
   - POST /osg-omgmt1042/member/m1/0103514          提交签到(进 App 积分签到页自动触发)
+  - POST /osg-omgmt1042/member/m1/0584614          累计签到抽奖(本月累计达 8/15/21/28 天档位时脚本自动提交)
   - POST /osg-omgmt1042/member/c1/q104051          查询签到金总额
   - POST /osg-omgmt1042/member/c1/q022607          查询签到记录(连签天数来源)
   - POST /emss-uia-center-front/member/c9/f03      查询账号资料(昵称/脱敏手机号)
   - 请求体为国密加密结构: {"data":"...","sign":"...","skey":"...","timestamp":"..."}
-      data/skey 由 App 原生层 SM2+SM4 加密生成,脚本无法构造,采用"原样复用+刷新时间戳"的重放方案:
+      签到/查询类请求由 App 原生层 SM2+SM4 加密生成,采用"原样复用+刷新时间戳"的重放方案:
       sign = SM3(skey + data + timestamp),timestamp 每次重新生成(公式已对多组抓包数据验证一致)
+      抽奖请求脚本可完全自构造(逆向算法后与服务端实测对齐):
+      skey = SM2(C1C3C2) 用内置服务端公钥加密 32 字节随机 hex 串;SM4 密钥 = 该串前 16 字节(ASCII 形式)
+      data = SM4-ECB-PKCS#7 加密明文 {"sourceAddr":"0101-1019#N"},N 为档位序号(1=8天,2=15天,3=21天,4=28天)
   - 响应为加密数据({"respKey","encryptData"}),本脚本内置国密解密:
       respKey = SM2 密文(C1C3C2 格式,加密的是 SM4 密钥),encryptData = SM4-ECB 密文
       SM2 私钥为客户端内置(所有安装共用),仅用于解密响应内容;非用户凭证
       解密后可读取: 今日签到金金额(data.rtnData)/签到金总额/账号昵称与脱敏手机号
   - 连签天数来自签到记录接口(q022607)的服务端数据,重放查询后按记录日期计算;
     未捕获该请求时不显示连签天数。签到被拒时若记录含今日,则判定为今日已签
+  - 累计签到抽奖: 记录返回的本月累计天数(signOfMonth)达到档位且未领取(signSource 0101-1019#N
+    即该档已领取记录)时自动提交抽奖,奖品金额从抽奖后重拉的记录中读取;未捕获记录请求时跳过抽奖
   - 鉴权: 请求头 t + userid + 设备头(appguid/appguidnew/devicetokentx/province 等),
     由 http-request 捕获规则自动抓取,无需账号密码/验证码
 
@@ -56,8 +62,10 @@ Author: ZahicX
 
   const BASE = "https://csc-service.sgcc.com.cn:28630";
   const SIGN_PATH = "/osg-omgmt1042/member/m1/0103514"; // 提交签到(进签到页自动触发)
+  const DRAW_PATH = "/osg-omgmt1042/member/m1/0584614"; // 累计签到抽奖(达档位自动提交)
   const TOTAL_PATH = "/osg-omgmt1042/member/c1/q104051"; // 签到金总额查询
   const RECORDS_PATH = "/osg-omgmt1042/member/c1/q022607"; // 签到记录查询(连签天数)
+  const DRAW_TIERS = [8, 15, 21, 28]; // 本月累计签到抽奖档位(天),序号 N = 下标 + 1
   const USER_PATH = "/emss-uia-center-front/member/c9/f03"; // 账号资料查询
   const STORE_KEY = "sgcc_accounts";
   // 需要捕获并复用的鉴权/设备头(与抓包核对)
@@ -287,8 +295,132 @@ Author: ZahicX
     });
   }
 
+  // ==================== 累计签到抽奖 ====================
+  // 本月累计签到天数: 优先服务端记录里的 signOfMonth(与 App 页面一致),缺失时按本月签到日期数
+  function monthSignDays(recs, todayStr) {
+    if (!Array.isArray(recs) || !recs.length) return null;
+    const ym = todayStr.slice(0, 7);
+    const cur = recs.filter((r) => String((r && r.signTime) || "").slice(0, 7) === ym);
+    const som = cur.map((r) => r.signOfMonth).filter((v) => typeof v === "number");
+    if (som.length) return Math.max.apply(null, som);
+    const days = new Set(
+      cur
+        .filter((r) => !/^0101-1019#\d+$/.test(String((r && r.signSource) || "")))
+        .map((r) => String(r.signTime || "").slice(0, 10))
+    );
+    return days.size || null;
+  }
+
+  // 本月已领取的抽奖档位序号(signSource = "0101-1019#N" 的记录即该档抽奖领取记录)
+  function claimedTiers(recs, todayStr) {
+    const ym = todayStr.slice(0, 7);
+    const set = new Set();
+    (recs || []).forEach((r) => {
+      if (String((r && r.signTime) || "").slice(0, 7) !== ym) return;
+      const m = String((r && r.signSource) || "").match(/^0101-1019#(\d+)$/);
+      if (m) set.add(parseInt(m[1], 10));
+    });
+    return set;
+  }
+
+  // 构造抽奖请求体: 自生成加密信封(skey=SM2 加密随机密钥,data=SM4-ECB 加密明文,sign 公式同签到)
+  function buildDrawBody(n) {
+    const kb = [];
+    for (let i = 0; i < 16; i++) kb.push(Math.floor(Math.random() * 256));
+    const keyStr = bytesToHex(kb); // 32 个小写 hex 字符,即 SM4 密钥原料
+    const keyAscii = asciiBytes(keyStr);
+    const skeyBytes = sm2EncryptC1C3C2(keyAscii);
+    if (!skeyBytes) return null;
+    const skey = bytesToHex(skeyBytes, true);
+    const data = bytesToHex(
+      sm4EcbEncrypt(keyAscii.slice(0, 16), asciiBytes(`{"sourceAddr":"0101-1019#${n}"}`)),
+      true
+    );
+    const ts = String(Date.now());
+    return JSON.stringify({ data, sign: sm3Hex(skey + data + ts), skey, timestamp: ts });
+  }
+
+  // 提交单个档位抽奖,N 为档位序号(1=8天,2=15天,3=21天,4=28天)
+  // 回调 {ok:true} 成功 / {ok:false, already:true} 本月已抽过 / {ok:false, msg} 失败
+  function drawTier(acc, n, cb) {
+    let body = null;
+    try {
+      body = buildDrawBody(n);
+    } catch (e) {}
+    if (!body) return cb({ ok: false, msg: "加密请求构造失败" });
+    http(
+      {
+        url: BASE + DRAW_PATH,
+        method: "POST",
+        headers: buildHeaders(acc),
+        body,
+      },
+      (err, _resp, data) => {
+        if (err) return cb({ ok: false, msg: `网络错误: ${String(err).slice(0, 50)}` });
+        let j = null;
+        try {
+          j = JSON.parse(data);
+        } catch (e) {}
+        if (!j || !j.encryptData) {
+          return cb({ ok: false, msg: String((j && j.message) || data || "响应异常").slice(0, 60) });
+        }
+        const dec = decryptGateway(data);
+        const d = dec.ok && dec.json && dec.json.data;
+        if (d && typeof d === "object" && d.rtnCode === 1) return cb({ ok: true });
+        if (d && d.rtnCode === 102030) return cb({ ok: false, already: true });
+        cb({ ok: false, msg: String((d && d.rtnMessage) || "响应异常").slice(0, 60) });
+      }
+    );
+  }
+
+  // 自动抽奖: 按服务端记录判定已达档位且未领取的档位,依次提交;回调通知行数组
+  function autoDraw(acc, recs, cb) {
+    const today = dateStr(new Date());
+    const days = recs ? monthSignDays(recs, today) : null;
+    if (days == null) return cb([]);
+    const claimed = claimedTiers(recs, today);
+    const todo = [];
+    DRAW_TIERS.forEach((d, i) => {
+      if (d <= days && !claimed.has(i + 1)) todo.push(i + 1);
+    });
+    if (!todo.length) return cb([]);
+    const results = [];
+    const run = (i) => {
+      if (i >= todo.length) {
+        // 抽奖后重拉记录,从 #N 记录读取各档奖品金额(与 App 展示一致)
+        return fetchRecords(acc, (recs2) => cb(drawResultLines(results, recs2 || recs, today)));
+      }
+      const n = todo[i];
+      drawTier(acc, n, (r) => {
+        results.push({ n, tier: DRAW_TIERS[n - 1], r });
+        run(i + 1);
+      });
+    };
+    run(0);
+  }
+
+  function drawResultLines(results, recs, todayStr) {
+    const ym = todayStr.slice(0, 7);
+    const lines = [];
+    results.forEach((it) => {
+      const prefix = `累计签到抽奖: ${it.tier}天档`;
+      if (it.r.ok) {
+        const rec = (recs || []).find(
+          (x) =>
+            String((x && x.signTime) || "").slice(0, 7) === ym &&
+            String((x && x.signSource) || "") === `0101-1019#${it.n}`
+        );
+        const gold = rec && rec.signGold != null ? rec.signGold : null;
+        lines.push(gold != null ? `${prefix} 获得 ${gold} 签到金` : `${prefix} 抽奖成功`);
+      } else if (!it.r.already) {
+        lines.push(`${prefix} 失败(${it.r.msg})`);
+      }
+    });
+    return lines;
+  }
+
   // ==================== 单账户完整流程 ====================
-  // 签到 → 记录 → 资料 → 总额,回调 done(blockText, dataMissing)
+  // 签到 → 记录 → 抽奖 → 资料 → 总额,回调 done(blockText, dataMissing)
   function signAccount(acc, done) {
     signAttempt(acc, 1, (err, dec) => {
       let result;
@@ -313,22 +445,26 @@ Author: ZahicX
           result = gold != null ? `今日已签, ${gold} 签到金` : `今日已签`;
         }
         if (streak != null) result += `, 连续成功 ${streak} 天`;
-        // 资料(更新昵称/手机号缓存)
-        fetchUserInfo(acc, (info) => {
-          if (info) {
-            if (info.nickname) acc.nickname = info.nickname;
-            if (info.mobileDst) acc.mobileDst = info.mobileDst;
-          }
-          // 总额
-          fetchTotal(acc, (total) => {
-            if (!signed && !recs && total != null && /系统正忙/.test(result)) {
-              // 记录请求未捕获/解密失败时无法确证,退回推断
-              result += ",凭证有效,可能今日已签";
+        // 累计签到抽奖(达档位且未领取时自动提交,结果行追加在签到行之后)
+        autoDraw(acc, recs, (drawLines) => {
+          // 资料(更新昵称/手机号缓存)
+          fetchUserInfo(acc, (info) => {
+            if (info) {
+              if (info.nickname) acc.nickname = info.nickname;
+              if (info.mobileDst) acc.mobileDst = info.mobileDst;
             }
-            let block = `国网账号: ${accountLabel(acc)}\n今日签到: ${result}`;
-            if (total != null) block += `\n签到金总额: ${total} 签到金`;
-            const missing = total == null || !acc.user || (!info && !!acc.user);
-            done(block, signed ? missing : false);
+            // 总额
+            fetchTotal(acc, (total) => {
+              if (!signed && !recs && total != null && /系统正忙/.test(result)) {
+                // 记录请求未捕获/解密失败时无法确证,退回推断
+                result += ",凭证有效,可能今日已签";
+              }
+              let block = `国网账号: ${accountLabel(acc)}\n今日签到: ${result}`;
+              if (drawLines.length) block += `\n${drawLines.join("\n")}`;
+              if (total != null) block += `\n签到金总额: ${total} 签到金`;
+              const missing = total == null || !acc.user || (!info && !!acc.user);
+              done(block, signed ? missing : false);
+            });
           });
         });
       });
@@ -340,6 +476,7 @@ Author: ZahicX
   //   国家电网签到金
   //   国网账号: 昵称(138*****0000)
   //   今日签到: 签到成功, 5 签到金,连续成功 3 天
+  //   累计签到抽奖: 8天档 获得 5 签到金   (仅达档位/抽奖时展示,可多行)
   //   签到金总额: 60 签到金
   function main() {
     const accounts = readAccounts();
@@ -374,6 +511,18 @@ Author: ZahicX
   function hexToBytes(hex) {
     const out = [];
     for (let i = 0; i + 1 < hex.length; i += 2) out.push(parseInt(hex.substr(i, 2), 16));
+    return out;
+  }
+
+  function bytesToHex(bytes, upper) {
+    let s = "";
+    for (const b of bytes) s += ("0" + (b & 0xff).toString(16)).slice(-2);
+    return upper ? s.toUpperCase() : s;
+  }
+
+  function asciiBytes(str) {
+    const out = [];
+    for (let i = 0; i < str.length; i++) out.push(str.charCodeAt(i) & 0xff);
     return out;
   }
 
@@ -582,6 +731,46 @@ Author: ZahicX
     }
   }
 
+  // ==================== SM2 加密 ====================
+  // 曲线生成元/阶(SM2 标准参数);服务端公钥来自 GDT_GM(所有安装共用),用于加密请求 skey;非用户凭证
+  const SM2_GX = 0x32c4ae2c1f1981195f9904466a39c9948fe30bbff2660be1715a4589334c74c7n;
+  const SM2_GY = 0xbc3736a2f4f6779c59bdcee36b692153d0a9877cc62a474002df32e52139f0a0n;
+  const SM2_N = 0xfffffffeffffffffffffffffffffffff7203df6b21c6052b53bbf40939d54123n;
+  const SM2_SRV_PUB = [
+    0x176976d8b4b3e0de348e6915a61b507844917a795a94ccf419809ed4ab459f0dn,
+    0xa73bf76fd297eff35e66f09f11a823da98f11190acc1f08fb7d4058b3b0ac79cn,
+  ];
+
+  // 随机标量 k ∈ [1, n-1]
+  function randomScalar() {
+    for (;;) {
+      const b = [];
+      for (let i = 0; i < 32; i++) b.push(Math.floor(Math.random() * 256));
+      const v = bytesToBigInt(b);
+      if (v > 0n && v < SM2_N) return v;
+    }
+  }
+
+  // SM2 加密(C1C3C2 格式,与响应解密互为镜像;msg 为明文字节数组,失败返回 null)
+  function sm2EncryptC1C3C2(msg) {
+    try {
+      for (let tries = 0; tries < 8; tries++) {
+        const k = randomScalar();
+        const C1 = ecMul(k, [SM2_GX, SM2_GY]);
+        const S = ecMul(k, SM2_SRV_PUB);
+        if (!C1 || !S) continue;
+        const x2 = bigIntToBytes(S[0]);
+        const y2 = bigIntToBytes(S[1]);
+        const t = gmKdf(x2.concat(y2), msg.length);
+        if (!t.some((b) => b !== 0)) continue; // KDF 输出全零,需更换随机数
+        const C2 = msg.map((m, i) => (m ^ t[i]) & 0xff);
+        const C3 = hexToBytes(sm3Bytes(x2.concat(msg, y2)));
+        return [4].concat(bigIntToBytes(C1[0]), bigIntToBytes(C1[1]), C3, C2);
+      }
+    } catch (e) {}
+    return null;
+  }
+
   // ==================== SM4 解密 ====================
   const SM4_SBOX=[0xd6,0x90,0xe9,0xfe,0xcc,0xe1,0x3d,0xb7,0x16,0xb6,0x14,0xc2,0x28,0xfb,0x2c,0x05,0x2b,0x67,0x9a,0x76,0x2a,0xbe,0x04,0xc3,0xaa,0x44,0x13,0x26,0x49,0x86,0x06,0x99,0x9c,0x42,0x50,0xf4,0x91,0xef,0x98,0x7a,0x33,0x54,0x0b,0x43,0xed,0xcf,0xac,0x62,0xe4,0xb3,0x1c,0xa9,0xc9,0x08,0xe8,0x95,0x80,0xdf,0x94,0xfa,0x75,0x8f,0x3f,0xa6,0x47,0x07,0xa7,0xfc,0xf3,0x73,0x17,0xba,0x83,0x59,0x3c,0x19,0xe6,0x85,0x4f,0xa8,0x68,0x6b,0x81,0xb2,0x71,0x64,0xda,0x8b,0xf8,0xeb,0x0f,0x4b,0x70,0x56,0x9d,0x35,0x1e,0x24,0x0e,0x5e,0x63,0x58,0xd1,0xa2,0x25,0x22,0x7c,0x3b,0x01,0x21,0x78,0x87,0xd4,0x00,0x46,0x57,0x9f,0xd3,0x27,0x52,0x4c,0x36,0x02,0xe7,0xa0,0xc4,0xc8,0x9e,0xea,0xbf,0x8a,0xd2,0x40,0xc7,0x38,0xb5,0xa3,0xf7,0xf2,0xce,0xf9,0x61,0x15,0xa1,0xe0,0xae,0x5d,0xa4,0x9b,0x34,0x1a,0x55,0xad,0x93,0x32,0x30,0xf5,0x8c,0xb1,0xe3,0x1d,0xf6,0xe2,0x2e,0x82,0x66,0xca,0x60,0xc0,0x29,0x23,0xab,0x0d,0x53,0x4e,0x6f,0xd5,0xdb,0x37,0x45,0xde,0xfd,0x8e,0x2f,0x03,0xff,0x6a,0x72,0x6d,0x6c,0x5b,0x51,0x8d,0x1b,0xaf,0x92,0xbb,0xdd,0xbc,0x7f,0x11,0xd9,0x5c,0x41,0x1f,0x10,0x5a,0xd8,0x0a,0xc1,0x31,0x88,0xa5,0xcd,0x7b,0xbd,0x2d,0x74,0xd0,0x12,0xb8,0xe5,0xb4,0xb0,0x89,0x69,0x97,0x4a,0x0c,0x96,0x77,0x7e,0x65,0xb9,0xf1,0x09,0xc5,0x6e,0xc6,0x84,0x18,0xf0,0x7d,0xec,0x3a,0xdc,0x4d,0x20,0x79,0xee,0x5f,0x3e,0xd7,0xcb,0x39,0x48];
   const SM4_CK=[0x00070e15,0x1c232a31,0x383f464d,0x545b6269,0x70777e85,0x8c939aa1,0xa8afb6bd,0xc4cbd2d9,0xe0e7eef5,0xfc030a11,0x181f262d,0x343b4249,0x50575e65,0x6c737a81,0x888f969d,0xa4abb2b9,0xc0c7ced5,0xdce3eaf1,0xf8ff060d,0x141b2229,0x30373e45,0x4c535a61,0x686f767d,0x848b9299,0xa0a7aeb5,0xbcc3cad1,0xd8dfe6ed,0xf4fb0209,0x10171e25,0x2c333a41,0x484f565d,0x646b7279];
@@ -640,6 +829,17 @@ Author: ZahicX
     const rk = sm4RoundKeys(key);
     const out = [];
     for (let off = 0; off + 16 <= data.length; off += 16)
+      sm4DecryptBlock(rk, data.slice(off, off + 16)).forEach((b) => out.push(b));
+    return out;
+  }
+
+  // SM4-ECB 加密(PKCS#7 填充;与解密共用轮函数,轮密钥恢复自然顺序即为加密)
+  function sm4EcbEncrypt(key, plain) {
+    const rk = sm4RoundKeys(key).slice().reverse();
+    const pad = 16 - (plain.length % 16);
+    const data = plain.concat(new Array(pad).fill(pad));
+    const out = [];
+    for (let off = 0; off < data.length; off += 16)
       sm4DecryptBlock(rk, data.slice(off, off + 16)).forEach((b) => out.push(b));
     return out;
   }
