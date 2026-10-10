@@ -1,10 +1,10 @@
 /*
-Date: 2026年9月11日03:21:19
+Date: 2026年10月11日2:23:23
 new Env('极核-ZEEHO');
-@Author: ZahicX 极核全任务（双网关签名 + 真机UA优先版）
+@Author: ZahicX 极核全任务（原生网关优先 + H5 兜底版）
 @Description: 每日签到 + 盲盒抽奖 + 发布打卡动态 + 点赞 + 评论 + 分享 + 自动清理动态 + 积分查询
 @Workflow: 签到 → 查签到记录(满30天且今日未抽则领盲盒) → 查今日任务状态(已做则跳过) → 发动态 → 取动态ID → 点赞 → 分享 → 删除动态(仅删本次所发) → 查总积分（评论任务默认关闭，POST_COMMENT=true 开启）
-@Gateway: 签到/抽奖/积分走 H5 网关(h5.zeehoev.com)，社区动态走原生网关(tapi.zeehoev.com)，双签名体系
+@Gateway: 全部功能优先走原生网关(tapi.zeehoev.com，凭据2年未变)，仅无响应/原生抽奖失败时回退 H5 网关(h5.zeehoev.com，凭据会随机轮换)；盲盒三级兜底: 原生lottery → 原生supplementPrize → H5lottery
 @Compat: Loon / Egern（Egern 以 Surge 兼容模式运行），另兼容 Surge / QX / Stash / NR / Node.js
 
 图标: https://raw.githubusercontent.com/ZahicX/Script/main/icon/zeeho.png
@@ -296,24 +296,24 @@ class UserInfo {
     };
   }
 
-  // 每日签到（任务1，H5 网关优先，失败回退 tapi 原生网关）
+  // 每日签到（任务1，原生网关优先，仅无响应时回退 H5 网关）
   async signin() {
     try {
+      const body = { server_name: "SMART" };
       let res = await this.fetch({
-        url: "https://h5.zeehoev.com/cfmotoservermine/signin",
+        url: "https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin",
         type: "post",
-        headers: getSign("h5"),
+        headers: getSign("native", JSON.stringify(body)),
+        body,
         dataType: "json"
       });
-      if (res?.code != '10000') {
-        // H5 网关异常时回退原生网关（参照单 tapi 方案），必须改用 native 签名
-        $.log(`⚠️ 签到: H5 网关未成功(${res?.message || '无响应'})，回退原生网关`);
-        const body = { server_name: "SMART" };
+      if (res == null) {
+        // 仅网络故障（无响应）回退 H5 网关；业务错误直接终止，避免误报与重复请求
+        $.log(`⚠️ 签到: 原生网关无响应，回退 H5 网关`);
         res = await this.fetch({
-          url: "https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin",
+          url: "https://h5.zeehoev.com/cfmotoservermine/H5/signin",
           type: "post",
-          headers: getSign("native", JSON.stringify(body)),
-          body,
+          headers: getSign("h5"),
           dataType: "json"
         });
       }
@@ -336,24 +336,24 @@ class UserInfo {
     }
   }
 
-  // 查询本月累计签到天数（任务2，H5 优先，失败回退原生网关）
+  // 查询本月累计签到天数（任务2，原生网关优先，仅无响应时回退 H5 网关）
   async getSignRecord() {
     try {
       const d = new Date();
       const month = `${d.getFullYear()}-${d.getMonth() + 1}`;
+      const q = `month=${month}&server_name=SMART`;
       let res = await this.fetch({
-        url: `https://h5.zeehoev.com/cfmotoservermine/signin/info?month=${month}`,
+        url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/info?${q}`,
         type: "get",
-        headers: getSign("h5", `month=${month}`),
+        headers: getSign("native", q),
         dataType: "json"
       });
-      if (res?.code != '10000') {
-        $.log(`⚠️ 签到记录: H5 网关未成功，回退原生网关`);
-        const q = `month=${month}&server_name=SMART`;
+      if (res == null) {
+        $.log(`⚠️ 签到记录: 原生网关无响应，回退 H5 网关`);
         res = await this.fetch({
-          url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/info?${q}`,
+          url: `https://h5.zeehoev.com/cfmotoservermine/H5/signin/info?month=${month}`,
           type: "get",
-          headers: getSign("native", q),
+          headers: getSign("h5", `month=${month}`),
           dataType: "json"
         });
       }
@@ -376,17 +376,17 @@ class UserInfo {
       const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const q = `page=1&pageSize=10`;
       let res = await this.fetch({
-        url: `https://h5.zeehoev.com/cfmotoservermine/signin/prizesDetail?${q}`,
+        url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/prizesDetail?${q}`,
         type: "get",
-        headers: getSign("h5", q),
+        headers: getSign("native", q),
         dataType: "json"
       });
-      // 仅「无响应」才回退原生网关；业务错误视为查询失败，交由抽奖流程处理
+      // 仅「无响应」才回退 H5 网关；业务错误视为查询失败，交由抽奖流程处理
       if (res == null) {
         res = await this.fetch({
-          url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/prizesDetail?${q}`,
+          url: `https://h5.zeehoev.com/cfmotoservermine/H5/signin/prizesDetail?${q}`,
           type: "get",
-          headers: getSign("native", q),
+          headers: getSign("h5", q),
           dataType: "json"
         });
       }
@@ -400,23 +400,38 @@ class UserInfo {
     }
   }
 
-  // 盲盒抽奖（任务3，满30天且今日未抽时领取；H5 优先，失败回退原生网关）
+  // 盲盒抽奖（任务3，原生网关优先：lottery → supplementPrize → H5 lottery 三级兜底）
+  // 已参与抽奖的业务错误立即终止，避免重复请求；其余失败逐级回退
   async lottery() {
     try {
       const q = `boxType=0&version=v2`;
+      const alreadyDrawn = (msg) => /已参与|已抽取|已经参与|已经抽取/.test(String(msg || ''));
       let res = await this.fetch({
-        url: `https://h5.zeehoev.com/cfmotoservermine/signin/lottery?${q}`,
+        url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/lottery?${q}`,
         type: "get",
-        headers: getSign("h5", q),
+        headers: getSign("native", q),
         dataType: "json"
       });
-      // 仅「无响应」（网关/网络故障）才回退原生网关；业务错误（code≠10000）直接终止，避免误报与重复请求
-      if (res == null) {
-        $.log(`⚠️ 盲盒抽奖: H5 网关无响应，回退原生网关`);
+      // 1) 原生 lottery 无响应（路由可能不存在）或业务异常（非「已抽取」）→ 尝试原版原生抽奖端点
+      if (res?.code != '10000' && !alreadyDrawn(res?.message)) {
+        $.log(`⚠️ 盲盒抽奖: 原生 lottery 未成功(${res?.message || '无响应'})，尝试 supplementPrize`);
+        const d = new Date();
+        const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        const q2 = `supplementDate=${today}`;
         res = await this.fetch({
-          url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/lottery?${q}`,
+          url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/supplementPrize?${q2}`,
           type: "get",
-          headers: getSign("native", q),
+          headers: getSign("native", q2),
+          dataType: "json"
+        });
+      }
+      // 2) 原生两级端点均未成功（仍非「已抽取」）→ 最后回退 H5 网关
+      if (res?.code != '10000' && !alreadyDrawn(res?.message)) {
+        $.log(`⚠️ 盲盒抽奖: 原生网关未成功(${res?.message || '无响应'})，回退 H5 网关`);
+        res = await this.fetch({
+          url: `https://h5.zeehoev.com/cfmotoservermine/H5/signin/lottery?${q}`,
+          type: "get",
+          headers: getSign("h5", q),
           dataType: "json"
         });
       }
@@ -425,6 +440,9 @@ class UserInfo {
         const prizesName = res?.data?.prizesName || integralScore + "积分";
         $.log(`✅ 盲盒抽奖获得: ${prizesName}`);
         return Number(integralScore) || 0;
+      } else if (alreadyDrawn(res?.message)) {
+        $.log(`ℹ️ 盲盒抽奖: 今日已抽取，跳过`);
+        return 0;
       } else {
         $.log(`⚠️ 盲盒抽奖(今日可能无盲盒): ${res?.message || '无响应'}`);
         return 0;
@@ -634,25 +652,16 @@ class UserInfo {
     }
   }
 
-  // 查询用户信息与积分（任务9）
+  // 查询用户信息与积分（任务9，原生网关；新版 H5 网关已无 setting 端点）
   async getSignInfo() {
     try {
       if (!this.userId) return null;
-      let res = await this.fetch({
-        url: `https://h5.zeehoev.com/cfmotoservermine/setting/${this.userId}`,
+      const res = await this.fetch({
+        url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/setting/${this.userId}`,
         type: "get",
-        headers: getSign("h5"),
+        headers: getSign("native"),
         dataType: "json"
       });
-      if (res?.code != '10000') {
-        // H5 网关失败时回退原生网关，必须改用 native 签名，否则必然 permit error
-        res = await this.fetch({
-          url: `https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/setting/${this.userId}`,
-          type: "get",
-          headers: getSign("native"),
-          dataType: "json"
-        });
-      }
       if (res?.code == '10000') {
         return res?.data?.score;
       }
@@ -712,8 +721,8 @@ async function getCookie() {
 //          H5 网关仅 GET 的 query 参与。可传字符串(直接用作前缀)或对象(自动转 query 串)。
 function getSign(type = "h5", payload = "") {
   const isH5 = type === "h5";
-  const appId = isH5 ? "Sw5F9uJi" : "S7qPWPU1";
-  const appSecret = isH5 ? "46870a8f678a09109468f5b0168818b91c292845" : "c5e0da7f4da28df805694ec3dd1fc6792e9df99d";
+  const appId = isH5 ? "AiTXmBrm" : "S7qPWPU1";
+  const appSecret = isH5 ? "70c2c7458ab88ca9504ad0521f170075bc91f2f7" : "c5e0da7f4da28df805694ec3dd1fc6792e9df99d";
   const timestamp = new Date().getTime();
   const nonce = isH5 ? getUuid() : `${timestamp}${getRandomChars(16)}`;
 
