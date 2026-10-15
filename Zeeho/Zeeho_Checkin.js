@@ -1,10 +1,10 @@
 /*
-Date: 2026年10月11日2:23:23
+Date: 2026年10月15日21:05:39
 new Env('极核-ZEEHO');
 @Author: ZahicX 极核全任务（原生网关优先 + H5 兜底版）
 @Description: 每日签到 + 盲盒抽奖 + 发布打卡动态 + 点赞 + 评论 + 分享 + 自动清理动态 + 积分查询
 @Workflow: 签到 → 查签到记录(满30天且今日未抽则领盲盒) → 查今日任务状态(已做则跳过) → 发动态 → 取动态ID → 点赞 → 分享 → 删除动态(仅删本次所发) → 查总积分（评论任务默认关闭，POST_COMMENT=true 开启）
-@Gateway: 全部功能优先走原生网关(tapi.zeehoev.com，凭据2年未变)，仅无响应/原生抽奖失败时回退 H5 网关(h5.zeehoev.com，凭据会随机轮换)；盲盒三级兜底: 原生lottery → 原生supplementPrize → H5lottery
+@Gateway: 除签到外全部功能优先走原生网关(tapi.zeehoev.com，凭据2年未变)，仅无响应/原生抽奖失败时回退 H5 网关(h5.zeehoev.com，凭据会随机轮换)；签到走 H5（2026-10-15 起原生 signin POST 被服务端下线）；盲盒三级兜底: 原生lottery → 原生supplementPrize → H5lottery
 @Compat: Loon / Egern（Egern 以 Surge 兼容模式运行），另兼容 Surge / QX / Stash / NR / Node.js
 
 图标: https://raw.githubusercontent.com/ZahicX/Script/main/icon/zeeho.png
@@ -296,40 +296,72 @@ class UserInfo {
     };
   }
 
-  // 每日签到（任务1，原生网关优先，仅无响应时回退 H5 网关）
+  // 每日签到（任务1，H5 网关优先）
+  // 2026-10-15 起原生 signin POST 被服务端下线（401/430 permit error，GET 不受影响），App 3.0.6 也已改走 H5 签到；
+  // H5 签到响应为用户信息对象（无 signInStatus），故以签到记录中「今日 integralScore」判定签到状态并取分
   async signin() {
     try {
-      const body = { server_name: "SMART" };
+      const d = new Date();
+      const month = `${d.getFullYear()}-${d.getMonth() + 1}`;
+      const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const fetchInfo = () => this.fetch({
+        url: `https://h5.zeehoev.com/cfmotoservermine/H5/signin/info?month=${month}`,
+        type: "get",
+        headers: getSign("h5", `month=${month}`),
+        dataType: "json"
+      });
+      const todayScoreOf = (res) => {
+        const rec = (res?.data?.nowSignDetailVos || []).find(x => x.createDate === today);
+        return rec?.integralScore != null ? Number(rec.integralScore) || 0 : null;
+      };
+      // 先查今日签到状态：已签则不重复 POST（与原生 signInStatus 行为一致）
+      let score = todayScoreOf(await fetchInfo());
+      if (score != null) {
+        $.log(`✅ 签到任务: 今日已签到`);
+        return 0;
+      }
+      // 未签 → H5 签到
       let res = await this.fetch({
-        url: "https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin",
+        url: "https://h5.zeehoev.com/cfmotoservermine/H5/signin",
         type: "post",
-        headers: getSign("native", JSON.stringify(body)),
-        body,
+        headers: getSign("h5"),
         dataType: "json"
       });
       if (res == null) {
-        // 仅网络故障（无响应）回退 H5 网关；业务错误直接终止，避免误报与重复请求
-        $.log(`⚠️ 签到: 原生网关无响应，回退 H5 网关`);
+        // 仅网络故障（无响应）回退原生网关；原生 signin POST 已下线，正常不会走到这里
+        $.log(`⚠️ 签到: H5 网关无响应，回退原生网关`);
+        const body = { server_name: "SMART" };
         res = await this.fetch({
-          url: "https://h5.zeehoev.com/cfmotoservermine/H5/signin",
+          url: "https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin",
           type: "post",
-          headers: getSign("h5"),
+          headers: getSign("native", JSON.stringify(body)),
+          body,
           dataType: "json"
         });
-      }
-      if (res?.code == '10000') {
-        if (res?.data?.signInStatus == 0) {
-          const gained = Number(res?.data?.integralScore) || 0;
-          $.log(gained ? `✅ 签到任务: 签到成功，获得 ${gained} 积分` : `✅ 签到任务: 签到成功（未返回积分）`);
-          return gained;
-        } else {
+        if (res?.code == '10000') {
+          if (res?.data?.signInStatus == 0) {
+            const gained = Number(res?.data?.integralScore) || 0;
+            $.log(gained ? `✅ 签到任务: 签到成功，获得 ${gained} 积分` : `✅ 签到任务: 签到成功（未返回积分）`);
+            return gained;
+          }
           $.log(`✅ 签到任务: 今日已签到`);
           return 0;
         }
-      } else {
         $.log(`⛔️ 签到任务: ${res?.message || ''}`);
         return 0;
       }
+      if (res?.code == '10000') {
+        // H5 响应为用户信息对象；重查签到记录取今日实际得分
+        score = todayScoreOf(await fetchInfo());
+        if (score != null) {
+          $.log(score ? `✅ 签到任务: 签到成功，获得 ${score} 积分` : `✅ 签到任务: 签到成功（未返回积分）`);
+          return score;
+        }
+        $.log(`✅ 签到任务: 签到成功（积分待签到记录确认）`);
+        return 0;
+      }
+      $.log(`⛔️ 签到任务: ${res?.message || ''}`);
+      return 0;
     } catch (e) {
       $.log(`⛔️ 签到异常: ${e.message || e}`);
       return 0;
