@@ -1,5 +1,5 @@
 /*
-Date: 2026年9月18日01:52:30
+Date: 2026年10月16日00:18:43
 Author: ZahicX
 徕芬 Laifen App 每日签到 - Loon 脚本(支持多账户,最多 5 个)
 接口来源:抓包记录 mall-gw.laifen.net
@@ -7,6 +7,13 @@ Author: ZahicX
   - POST /mall_marketing/sc/activity/sign/do       执行签到 body {"activityId":3}
   - GET  /mall_user/user/ma/user_detail_info       查询用户信息(昵称)
   - GET  /mall_user/sc/member/info                 查询会员信息(data.availablePoint 总积分)
+
+持久化存储($persistentStore):
+  key   = laifen_token
+  value = {"accounts":[{"userId":123456,"token":"xxx","nickName":"xxx"}, ...]}
+  - 账户以 userId 为唯一标识,最多 5 个;同一账户 token 续期时自动替换旧 token
+  - 兼容旧格式:单账户对象 {"token":...,"nickName":...} 或纯字符串(仅 token)
+  - 无 userId 的旧数据仍保留;若其 token 已失效(401/403)将自动移除并通知
 
 [Script] 配置:
   # 脚本图标: https://raw.githubusercontent.com/ZahicX/Script/main/icon/laifen.png
@@ -165,17 +172,28 @@ Author: ZahicX
   }
 
   // ---------- 单账户签到 ----------
-  // 完成回调 done(resultText),resultText 为签到结果描述
+  // 完成回调 done(nick, resultText, meta),resultText 为签到结果描述;
+  // meta.expired=true 表示 token 已失效(活动查询返回 401/403)
   function signAccount(acc, done) {
     const token = acc.token;
     const nick = acc.nickName || "未知账号";
     http(
       { url: `${BASE}/mall_marketing/sc/activity/sign/current`, method: "GET", headers: headers(token) },
-      (err, _resp, data) => {
+      (err, resp, data) => {
         if (err || !data || !data.success || !data.data) {
+          // err 非空=网络层失败;否则看 HTTP 状态码(401/403 即 token 过期,响应体通常为空)
+          const status = resp && resp.status;
+          const detail =
+            (data && (data.msg || data.code)) ||
+            (status && status !== 200
+              ? `HTTP ${status}${status === 401 || status === 403 ? ",登录已过期" : ""}`
+              : null) ||
+            err ||
+            "网络错误";
           return done(
             nick,
-            `失败(查询活动异常:${(data && (data.msg || data.code)) || err || "网络错误"},若登录过期请重新打开签到页捕获 Token)`
+            `失败(查询活动异常:${detail},若登录过期请切换到该账号重新打开签到页捕获 Token)`,
+            { expired: status === 401 || status === 403 }
           );
         }
         const d = data.data;
@@ -227,14 +245,30 @@ Author: ZahicX
       );
     }
     const lines = [];
+    // 昵称可能重复:同名账户在通知里追加账户ID后缀以便区分
+    const nickCount = {};
+    accounts.forEach((a) => {
+      const n = a.nickName || "未知账号";
+      nickCount[n] = (nickCount[n] || 0) + 1;
+    });
     let i = 0;
     const next = () => {
       if (i >= accounts.length) {
         return notify("Laifen", lines.join("\n\n"));
       }
       const acc = accounts[i++];
-      signAccount(acc, (nick, result) => {
-        lines.push(`Laifen账号: ${nick}\nLaifen签到：${result}`);
+      signAccount(acc, (nick, result, meta) => {
+        const label =
+          nickCount[nick] > 1 ? `${nick}(${acc.userId || "未识别"})` : nick;
+        let text = result;
+        // 旧格式条目(无 userId)token 失效后无法通过重新捕获归并,自动移除避免每天报错
+        if (meta && meta.expired && !acc.userId) {
+          const di = accounts.indexOf(acc);
+          if (di !== -1) accounts.splice(di, 1);
+          saveAccounts(accounts);
+          text += "\n(该条目为无账户ID的旧格式数据,已自动移除)";
+        }
+        lines.push(`Laifen账号: ${label}\nLaifen签到：${text}`);
         next();
       });
     };
