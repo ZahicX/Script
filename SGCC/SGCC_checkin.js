@@ -1,12 +1,12 @@
 /*
-Date: 2026年10月9日01:34:33
+Date: 2026年10月15日23:46:43
 Author: ZahicX
 国家电网(网上国网 95598) 签到金每日签到 - Loon 脚本(支持多账户,最多 5 个) v3
 接口来源:抓包记录 csc-service.sgcc.com.cn:28630(网上国网 App,签到活动 ACT20208020/H5 包 V00000419)
   - POST /osg-omgmt1042/member/m1/0103514          提交签到(进 App 积分签到页自动触发)
   - POST /osg-omgmt1042/member/m1/0584614          累计签到抽奖(本月累计达 8/15/21/28 天档位时脚本自动提交)
   - POST /osg-omgmt1042/member/c1/q104051          查询签到金总额
-  - POST /osg-omgmt1042/member/c1/q022607          查询签到记录(连签天数来源)
+  - POST /osg-omgmt1042/member/c1/q022607          查询签到记录(本月累计签到天数来源)
   - POST /emss-uia-center-front/member/c9/f03      查询账号资料(昵称/脱敏手机号)
   - 请求体为国密加密结构: {"data":"...","sign":"...","skey":"...","timestamp":"..."}
       签到/查询类请求由 App 原生层 SM2+SM4 加密生成,采用"原样复用+刷新时间戳"的重放方案:
@@ -18,8 +18,9 @@ Author: ZahicX
       respKey = SM2 密文(C1C3C2 格式,加密的是 SM4 密钥),encryptData = SM4-ECB 密文
       SM2 私钥为客户端内置(所有安装共用),仅用于解密响应内容;非用户凭证
       解密后可读取: 今日签到金金额(data.rtnData)/签到金总额/账号昵称与脱敏手机号
-  - 连签天数来自签到记录接口(q022607)的服务端数据,重放查询后按记录日期计算;
-    未捕获该请求时不显示连签天数。签到被拒时若记录含今日,则判定为今日已签
+  - 本月累计签到天数来自签到记录接口(q022607)的服务端字段 signOfMonth(与 App 页面一致),
+    服务端只在本月最新一条记录上返回该字段;未捕获该请求时不显示累计天数。
+    签到被拒时若记录含今日,则判定为今日已签
   - 累计签到抽奖: 记录返回的本月累计天数(signOfMonth)达到档位且未领取(signSource 0101-1019#N
     即该档已领取记录)时自动提交抽奖,奖品金额从抽奖后重拉的记录中读取;未捕获记录请求时跳过抽奖
   - 鉴权: 请求头 t + userid + 设备头(appguid/appguidnew/devicetokentx/province 等),
@@ -38,7 +39,7 @@ Author: ZahicX
   #   {"accounts":[{"userid":"...","headers":{t/userid/设备头/cookie},
   #     "sign":{data,skey,path}|null,    提交签到请求
   #     "total":{data,skey,path}|null,   签到金总额查询请求
-  #     "records":{data,skey,path}|null, 签到记录查询请求(连签天数来源)
+  #     "records":{data,skey,path}|null, 签到记录查询请求(累计天数来源)
   #     "user":{data,skey,path}|null,    账号资料查询请求
   #     "nickname":"...","mobileDst":"...","updatedAt":0}]}
   #   打开 App 积分签到页(签到/总额/记录请求)与「我的」页(资料请求)即自动捕获/更新;
@@ -64,7 +65,7 @@ Author: ZahicX
   const SIGN_PATH = "/osg-omgmt1042/member/m1/0103514"; // 提交签到(进签到页自动触发)
   const DRAW_PATH = "/osg-omgmt1042/member/m1/0584614"; // 累计签到抽奖(达档位自动提交)
   const TOTAL_PATH = "/osg-omgmt1042/member/c1/q104051"; // 签到金总额查询
-  const RECORDS_PATH = "/osg-omgmt1042/member/c1/q022607"; // 签到记录查询(连签天数)
+  const RECORDS_PATH = "/osg-omgmt1042/member/c1/q022607"; // 签到记录查询(累计天数)
   const DRAW_TIERS = [8, 15, 21, 28]; // 本月累计签到抽奖档位(天),序号 N = 下标 + 1
   const USER_PATH = "/emss-uia-center-front/member/c9/f03"; // 账号资料查询
   const STORE_KEY = "sgcc_accounts";
@@ -98,7 +99,7 @@ Author: ZahicX
   // 持久化结构: {"accounts":[{
   //   userid, headers:{...鉴权/设备头}, sign:{data,skey,path}|null,
   //   total:{data,skey,path}|null, user:{data,skey,path}|null,
-  //   nickname, mobileDst, streak, lastSignDate("YYYY-MM-DD"), updatedAt
+  //   nickname, mobileDst, updatedAt
   // }, ...]}
   // 账户以请求头 userid 为唯一标识
   function readAccounts() {
@@ -202,22 +203,6 @@ Author: ZahicX
       },
       cb
     );
-  }
-
-  // 连签天数(来自服务端签到记录): 记录含今日则从今日回数,否则从昨日回数,中断即止
-  function calcStreak(recs, todayStr) {
-    if (!Array.isArray(recs) || !recs.length) return null;
-    const days = new Set(
-      recs.map((r) => String((r && r.signTime) || "").slice(0, 10)).filter(Boolean)
-    );
-    let d = new Date(`${todayStr}T00:00:00`);
-    if (!days.has(dateStr(d))) d = new Date(d.getTime() - 24 * 3600 * 1000);
-    let n = 0;
-    while (days.has(dateStr(d))) {
-      n++;
-      d = new Date(d.getTime() - 24 * 3600 * 1000);
-    }
-    return n || null;
   }
 
   // ==================== 签到 ====================
@@ -432,10 +417,10 @@ Author: ZahicX
       } else {
         result = err;
       }
-      // 签到记录(连签天数/今日已签判定,来自服务端)
+      // 签到记录(本月累计天数/今日已签判定,来自服务端)
       fetchRecords(acc, (recs) => {
         const today = dateStr(new Date());
-        const streak = recs ? calcStreak(recs, today) : null;
+        const monthDays = recs ? monthSignDays(recs, today) : null;
         const recToday =
           recs &&
           recs.find((r) => String((r && r.signTime) || "").slice(0, 10) === today);
@@ -444,7 +429,7 @@ Author: ZahicX
           const gold = recToday.signGold != null ? recToday.signGold : extractRtn(dec);
           result = gold != null ? `今日已签, ${gold} 签到金` : `今日已签`;
         }
-        if (streak != null) result += `, 连续成功 ${streak} 天`;
+        if (monthDays != null) result += `, 累计签到 ${monthDays} 天`;
         // 累计签到抽奖(达档位且未领取时自动提交,结果行追加在签到行之后)
         autoDraw(acc, recs, (drawLines) => {
           // 资料(更新昵称/手机号缓存)
@@ -475,7 +460,7 @@ Author: ZahicX
   // 通知格式:
   //   国家电网签到金
   //   国网账号: 昵称(138*****0000)
-  //   今日签到: 签到成功, 5 签到金,连续成功 3 天
+  //   今日签到: 签到成功, 5 签到金,累计签到 3 天
   //   累计签到抽奖: 8天档 获得 5 签到金   (仅达档位/抽奖时展示,可多行)
   //   签到金总额: 60 签到金
   function main() {
@@ -920,7 +905,7 @@ Author: ZahicX
     const cookie = low["cookie"];
     if (cookie) picked.cookie = cookie;
 
-    const acc = isNew ? { userid: uid, streak: 0 } : accounts[idx];
+    const acc = isNew ? { userid: uid } : accounts[idx];
     const prevT = acc.headers && acc.headers.t;
     const prevKinds = capturedKinds(acc);
     acc.headers = picked;
