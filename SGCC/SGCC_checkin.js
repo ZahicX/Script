@@ -1,5 +1,5 @@
 /*
-Date: 2026年10月15日23:46:43
+Date: 2026年10月31日16:01:49
 Author: ZahicX
 国家电网(网上国网 95598) 签到金每日签到 - Loon 脚本(支持多账户,最多 5 个) v3
 接口来源:抓包记录 csc-service.sgcc.com.cn:28630(网上国网 App,签到活动 ACT20208020/H5 包 V00000419)
@@ -20,7 +20,8 @@ Author: ZahicX
       解密后可读取: 今日签到金金额(data.rtnData)/签到金总额/账号昵称与脱敏手机号
   - 本月累计签到天数来自签到记录接口(q022607)的服务端字段 signOfMonth(与 App 页面一致),
     服务端只在本月最新一条记录上返回该字段;未捕获该请求时不显示累计天数。
-    签到被拒时若记录含今日,则判定为今日已签
+    签到被拒(明文"系统正忙")时若记录含今日,判定为今日已签;
+    重复签到返回加密 102007(今日参与次数已用完),同样确证今日已签
   - 累计签到抽奖: 记录返回的本月累计天数(signOfMonth)达到档位且未领取(signSource 0101-1019#N
     即该档已领取记录)时自动提交抽奖,奖品金额从抽奖后重拉的记录中读取;未捕获记录请求时跳过抽奖
   - 鉴权: 请求头 t + userid + 设备头(appguid/appguidnew/devicetokentx/province 等),
@@ -229,7 +230,7 @@ Author: ZahicX
         acc.updatedAt = Date.now();
         return done(null, decryptGateway(data));
       }
-      // 服务器对各类失败(含已签到/Cookie 失效)均只回"系统正忙",无法细分
+      // 服务器对各类失败仍回明文"系统正忙";已签到则返回加密 102007(signAccount 中识别)
       if (n < MAX_RETRY) {
         return setTimeout(() => signAttempt(acc, n + 1, done), RETRY_DELAY);
       }
@@ -410,10 +411,21 @@ Author: ZahicX
     signAttempt(acc, 1, (err, dec) => {
       let result;
       let signed = false;
+      let already = false; // 服务端确证今日已签(加密 102007)
       if (!err) {
-        signed = true;
+        const d = dec && dec.json && dec.json.data;
+        const rc = d && typeof d === "object" ? d.rtnCode : null;
         const amount = extractRtn(dec);
-        result = amount != null ? `签到成功, ${amount} 签到金` : `签到成功`;
+        if (rc === 102007) {
+          // 重复签到: 服务端返回加密 102007「今日参与次数已用完」,确证今日已签
+          already = true;
+          result = `今日已签`;
+        } else if (rc != null && rc !== 1 && d.rtnMessage) {
+          result = `失败(${String(d.rtnMessage).slice(0, 40)})`;
+        } else {
+          signed = true;
+          result = amount != null ? `签到成功, ${amount} 签到金` : `签到成功`;
+        }
       } else {
         result = err;
       }
@@ -448,7 +460,7 @@ Author: ZahicX
               if (drawLines.length) block += `\n${drawLines.join("\n")}`;
               if (total != null) block += `\n签到金总额: ${total} 签到金`;
               const missing = total == null || !acc.user || (!info && !!acc.user);
-              done(block, signed ? missing : false);
+              done(block, signed || already ? missing : false);
             });
           });
         });
