@@ -1,0 +1,53 @@
+#!name = 每日签到（WorkBuddy / Trae / Qoder）
+#!desc = 每天定时依次领取 WorkBuddy、Trae CN、Qoder 的每日积分；三个平台各有开关，凭据统一放 agent_state 里
+#!author = ZahicX
+#!icon = https://raw.githubusercontent.com/ZahicX/Script/main/icon/Agent_Checkin_3in1.png
+#!system = iOS,iPadOS,macOS
+#!system_version = 15
+#!loon_version = 3.5.1(988)
+#!tag = 签到,工具
+#!date = 2026-11-05 01:07:46
+#!type = normal
+
+# 端点与鉴权口径来自 CreditDaddy（MIT · techysy）。
+# token 只存本机、只发给对应平台官方接口。脚本文件 agent_checkin_all.js 要和本插件放在一起。
+#
+# 凭据怎么来：电脑上跑 `node tools/export-state.js`（或直接把它拖进终端回车），
+# 把输出的那一行贴进插件参数 Agent State（唯一入口，脚本不读写持久化里的 agent_state）。
+#
+# 为什么定在 10:05：WorkBuddy / Trae 的签到资格在 0 点刷新，Qoder 是 10:00 才刷新，
+# 统一放在 10:05 跑一次，三家都能签上。
+
+# ---------------------------------------------------------------
+# 这三家都是国内服务，按 IP 做风控：走境外代理节点会直接 401 / 1001。
+# 插件规则优先级「本地 > 插件 > 订阅」，所以这里强制直连能盖掉订阅里的代理规则。
+# 如果你本机直连这三家本来就不通，把下面几行删掉自己调策略组。
+# ---------------------------------------------------------------
+[Rule]
+DOMAIN-SUFFIX,codebuddy.cn,DIRECT
+DOMAIN-SUFFIX,workbuddy.cn,DIRECT
+DOMAIN,copilot.tencent.com,DIRECT
+DOMAIN,api.trae.cn,DIRECT
+DOMAIN-SUFFIX,qoder.com.cn,DIRECT
+
+[Argument]
+
+cron_enable = switch,true,tag=第一次签到,desc=关掉后这一条不跑，第二次照常
+cron = input,"5 10 * * *",tag=第一次签到时间,desc=五段 cron（分 时 日 月 周），默认每天 10:05
+cron2_enable = switch,true,tag=第二次签到,desc=关掉后这一条不跑，第一次照常
+cron2 = input,"0 13 * * *",tag=第二次签到时间,desc=五段 cron，默认每天 13:00（补跑用，已签过的平台会自己跳过）
+wb_enable = switch,true,tag=WorkBuddy 签到,desc=关掉后本次不跑 WorkBuddy，另外两个照常
+trae_enable = switch,true,tag=Trae 签到,desc=关掉后本次不跑 Trae，另外两个照常
+qoder_enable = switch,true,tag=Qoder 签到,desc=关掉后本次不跑 Qoder，另外两个照常
+notify = switch,true,tag=发送通知,desc=关掉后只在脚本日志里留记录；三个平台合成一条通知
+agent_state = input,"",tag=Agent State,desc=凭据唯一入口：贴 export-state.js 输出的那一行；留空则本次不签到
+
+[Script]
+
+# 每次 cron 跑三个平台：一个任务、一份日志、一条通知。三个平台开关决定本次跑哪几家，
+# 两条 cron 各有自己的开关，可以单独关掉其中一条。
+cron ${cron} then script("agent_checkin_all.js", {${agent_state}, ${notify}, ${wb_enable}, ${trae_enable}, ${qoder_enable}}) with enable=${cron_enable}, tag="三平台签到（第一次）", timeout=300
+
+# 第二次（补跑）：默认每天 13:00，用来兜住 10:05 那次失败的情况。
+# 当天已经签过的平台会由服务端判定为「已签」，不会重复领；不想要就关掉上面的「第二次签到」开关。
+cron ${cron2} then script("agent_checkin_all.js", {${agent_state}, ${notify}, ${wb_enable}, ${trae_enable}, ${qoder_enable}}) with enable=${cron2_enable}, tag="三平台签到（第二次）", timeout=300
