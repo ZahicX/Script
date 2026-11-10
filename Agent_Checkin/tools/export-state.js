@@ -2,12 +2,12 @@
 /**
  * 一条命令收齐三个平台的凭据，输出一行 agent_state，贴进 Loon 就能签到。
  *
- * 最后更新：2026-11-05 01:07:46
+ * 最后更新：2026-11-10 16:14:21
  *
  * 单文件、零本地依赖：Trae / Qoder 的本机解密、WorkBuddy 的浏览器登录，全部内联在这一个文件里。
  * 迁移时只复制这一个文件即可（自带 shebang 和可执行位，可直接拖进终端回车）：
  *
- *   ./export-state.js          # 正常导出：每个平台拿到就打印，最后汇总 agent_state
+ *   ./export-state.js          # 正常导出：每个平台拿到就打印，最后汇总 agent_state 并自动复制到剪贴板
  *   ./export-state.js --check  # 只核对取到了哪些字段 / 长度 / 过期时间，不打印凭据
  *
  * 顺序固定为 Trae → Qoder → WorkBuddy：前两个从本机客户端直接解密，不需要你动手；
@@ -456,11 +456,22 @@ async function main() {
 
   const state = ["v=1"].concat(fields.map(([k, v]) => k + "=" + v)).join(";");
 
+  // 直接放进剪贴板，省得手动选中复制；--check 模式上面已经 return，不会走到这里。
+  let copied = false;
+  try {
+    execFileSync("pbcopy", [], { input: state, stdio: ["pipe", "ignore", "ignore"], timeout: 5000 });
+    copied = true;
+  } catch (e) {
+    // pbcopy 不可用就照常打印，手动复制即可，不让剪贴板问题影响导出。
+  }
+
   console.log("");
   console.log("---------- agent_state（" + fields.length + " 个字段） ----------");
   console.log(state);
   console.log("----------------------------------------------------------");
   console.log("");
+  if (copied) console.log("已复制到剪贴板，直接去 Loon 里粘贴即可。");
+  else console.log("（剪贴板不可用，请手动复制上面那一行 agent_state。）");
   console.log("贴进 Loon：插件「每日签到」→ 参数 → Agent State，把上面那一行整段粘进去覆盖旧的。");
   console.log("然后等下一次 cron（默认每天 10:05）；想立刻验证就把签到时间临时改成 * * * * *。");
   console.log("");
