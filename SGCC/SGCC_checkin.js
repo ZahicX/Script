@@ -1,7 +1,7 @@
 /*
-Date: 2026年11月21日17:25:14 v3.2.5.02
+Date: 2026年11月21日18:49:43 v3.2.5.08
 Author: ZahicX
-国家电网(网上国网 95598) 签到金每日签到 - Loon 脚本(支持多账户,最多 5 个) v3.2.5.02
+国家电网(网上国网 95598) 签到金每日签到 - Loon 脚本(支持多账户,最多 5 个) v3.2.5.08
 版本号规则: 前三位跟随逆向的 App 版本(当前 3.2.5),后两位为脚本改动序号(01、02…);
 App 升级导致解密失效时重取砸壳 IPA,前缀与密钥一并同步更新
 接口来源:抓包记录 csc-service.sgcc.com.cn:28630(网上国网 App,签到活动 ACT20208020/H5 包 V00000419)
@@ -249,29 +249,17 @@ App 升级导致解密失效时重取砸壳 IPA,前缀与密钥一并同步更�
   }
 
   // 查询账号资料(c9/f03),成功回调 {nickname, mobileDst},失败回调 null
+  // 注: 该接口(c9/f03)重放会被网关拒(明文 {"code":"101007",...[错误码：S1007]}),
+  //     与 osg-omgmt1042 的签到/总额/记录不同,资料请求只在缓存缺失时才尝试刷新
   function fetchUserInfo(acc, cb) {
-    if (!acc.user || !acc.user.data || !acc.user.skey) {
-      console.log("[SGCC debug] 资料: 未捕获 c9/f03 请求");
-      return cb(null);
+    if (acc.nickname) {
+      return cb({ nickname: acc.nickname, mobileDst: acc.mobileDst || null });
     }
+    if (!acc.user || !acc.user.data || !acc.user.skey) return cb(null);
     replayReq(acc, acc.user, (err, _resp, data) => {
-      if (err) {
-        console.log(`[SGCC debug] 资料: 重放失败 ${err}`);
-        return cb(null);
-      }
+      if (err) return cb(null);
       const dec = decryptGateway(data);
-      if (!dec.ok) {
-        console.log(`[SGCC debug] 资料: 解密失败, 原始响应前80字符=${String(data || "").slice(0, 80)}`);
-        return cb(null);
-      }
-      const keysOf = (v) =>
-        v && typeof v === "object" ? Object.keys(v).join(",") : String(typeof v);
-      const j = dec.json;
-      console.log(
-        `[SGCC debug] 资料结构: root=${keysOf(j)} | data=${keysOf(j && j.data)} | bizrt=${keysOf(
-          j && j.data && j.data.bizrt
-        )} | userInfo=${keysOf(j && j.data && j.data.bizrt && j.data.bizrt.userInfo)}`
-      );
+      if (!dec.ok) return cb(null);
       try {
         const u = dec.json.data.bizrt.userInfo;
         cb({
@@ -279,7 +267,6 @@ App 升级导致解密失效时重取砸壳 IPA,前缀与密钥一并同步更�
           mobileDst: u.mobile_dst || null,
         });
       } catch (e) {
-        console.log(`[SGCC debug] 资料: 取 data.bizrt.userInfo 异常 ${e.message}`);
         cb(null);
       }
     });
@@ -490,7 +477,7 @@ App 升级导致解密失效时重取砸壳 IPA,前缀与密钥一并同步更�
               let block = `国网账号: ${accountLabel(acc)}\n今日签到: ${result}`;
               if (drawLines.length) block += `\n${drawLines.join("\n")}`;
               if (total != null) block += `\n签到金总额: ${total} 签到金`;
-              const missing = total == null || !acc.user || (!info && !!acc.user);
+              const missing = total == null || (!info && !acc.nickname);
               done(block, signed || already ? missing : false);
             });
           });
@@ -911,8 +898,63 @@ App 升级导致解密失效时重取砸壳 IPA,前缀与密钥一并同步更�
     return null;
   }
 
+  // ==================== 资料响应捕获(http-response) ====================
+  // 资料接口 c9/f03 的请求重放会被网关拒(明文 101007/S1007),改为在 App 打开
+  // 「我的」页时直接解密其响应并缓存昵称/脱敏手机号(该接口实测可用)
+  function handleUserResponse() {
+    try {
+      // userid 是请求头,必须从 $request.headers 取;响应头一并合并进来看 x-script
+      const low = {};
+      [$request && $request.headers, $response.headers].forEach((src) => {
+        for (const k in src || {}) low[k.toLowerCase()] = src[k];
+      });
+      // 不依赖 $request/$response.url(部分版本响应脚本里没有),只靠规则命中 + 报文特征识别
+      if ((low["x-script"] || "") === NAME) return $done({});
+      const body = $response.body || "";
+      if (!body) {
+        console.log("[SGCC] 资料响应体为空,请检查 http-response 规则的 requires-body");
+        return $done({});
+      }
+      const dec = decryptGateway(body);
+      if (!dec.ok) {
+        console.log(`[SGCC] 资料响应解密失败, 原始前80字符=${String(body).slice(0, 80)}`);
+        return $done({});
+      }
+      const keysOf = (v) =>
+        v && typeof v === "object" ? Object.keys(v).join(",") : String(typeof v);
+      const j = dec.json;
+      const info = j && j.data && j.data.bizrt && j.data.bizrt.userInfo;
+      const uid = low["userid"];
+      if (!info || !uid) {
+        console.log(
+          `[SGCC] 资料结构异常: root=${keysOf(j)} data=${keysOf(j && j.data)} bizrt=${keysOf(
+            j && j.data && j.data.bizrt
+          )} userInfo=${keysOf(info)}`
+        );
+        return $done({});
+      }
+      const accounts = readAccounts();
+      const idx = accounts.findIndex((a) => a.userid === uid);
+      if (idx === -1) return $done({});
+      const before = `${accounts[idx].nickname || ""}|${accounts[idx].mobileDst || ""}`;
+      if (info.nickname) accounts[idx].nickname = info.nickname;
+      if (info.mobile_dst) accounts[idx].mobileDst = info.mobile_dst;
+      saveAccounts(accounts);
+      console.log("[SGCC] 资料已缓存: 昵称/脱敏手机号");
+      // 昵称或手机号有变化才通知,避免每次打开「我的」页都弹
+      if (`${accounts[idx].nickname || ""}|${accounts[idx].mobileDst || ""}` !== before) {
+        push("国家电网签到金资料已更新", accountLabel(accounts[idx]), "昵称/脱敏手机号已缓存");
+      }
+    } catch (e) {
+      console.log(`[SGCC] 资料响应处理异常: ${e.message}`);
+    }
+    return $done({});
+  }
+
   // ==================== 入口分流 ====================
-  if (typeof $request !== "undefined") {
+  if (typeof $response !== "undefined") {
+    handleUserResponse();
+  } else if (typeof $request !== "undefined") {
     // http-request 模式:捕获鉴权头 + 三类加密请求体(签到/总额/资料)
     const hdr = $request.headers || {};
     const low = {};
@@ -990,7 +1032,10 @@ App 升级导致解密失效时重取砸壳 IPA,前缀与密钥一并同步更�
           `已捕获请求: ${nowKinds.join("/") || "无"}`
         );
       } else if (got && nowKinds.length > prevKinds.length) {
-        push("国家电网签到金凭证已更新", accountLabel(acc), `✅ 新捕获: ${kindName(got)}请求`);
+        // 资料请求的昵称要等响应解密后才拿到,通知交给 http-response 侧发送
+        if (got !== "user") {
+          push("国家电网签到金凭证已更新", accountLabel(acc), `✅ 新捕获: ${kindName(got)}请求`);
+        }
       }
     }
     $done({});
