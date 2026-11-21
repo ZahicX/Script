@@ -1,7 +1,9 @@
 /*
-Date: 2026年10月31日16:01:49
+Date: 2026年11月21日17:25:14 v3.2.5.02
 Author: ZahicX
-国家电网(网上国网 95598) 签到金每日签到 - Loon 脚本(支持多账户,最多 5 个) v3
+国家电网(网上国网 95598) 签到金每日签到 - Loon 脚本(支持多账户,最多 5 个) v3.2.5.02
+版本号规则: 前三位跟随逆向的 App 版本(当前 3.2.5),后两位为脚本改动序号(01、02…);
+App 升级导致解密失效时重取砸壳 IPA,前缀与密钥一并同步更新
 接口来源:抓包记录 csc-service.sgcc.com.cn:28630(网上国网 App,签到活动 ACT20208020/H5 包 V00000419)
   - POST /osg-omgmt1042/member/m1/0103514          提交签到(进 App 积分签到页自动触发)
   - POST /osg-omgmt1042/member/m1/0584614          累计签到抽奖(本月累计达 8/15/21/28 天档位时脚本自动提交)
@@ -17,6 +19,9 @@ Author: ZahicX
   - 响应为加密数据({"respKey","encryptData"}),本脚本内置国密解密:
       respKey = SM2 密文(C1C3C2 格式,加密的是 SM4 密钥),encryptData = SM4-ECB 密文
       SM2 私钥为客户端内置(所有安装共用),仅用于解密响应内容;非用户凭证
+      注: App 3.2.5 轮换了 SM2 密钥对,密钥内置于 GDT_GM 的 stringCapabilityOpenPlatform
+          (stringOpenPlatformPuId=请求 skey 用服务端公钥 / stringOpenPlatformPrId=响应解密私钥),
+          本脚本 v3.2.5.01 起同步为新密钥;旧版 App 抓到的响应需用旧密钥解
       解密后可读取: 今日签到金金额(data.rtnData)/签到金总额/账号昵称与脱敏手机号
   - 本月累计签到天数来自签到记录接口(q022607)的服务端字段 signOfMonth(与 App 页面一致),
     服务端只在本月最新一条记录上返回该字段;未捕获该请求时不显示累计天数。
@@ -227,8 +232,13 @@ Author: ZahicX
         if (!ok) msg = j.message || msg;
       } catch (e) {}
       if (ok) {
+        // 响应已加密只代表网关放行;解密失败时无法确认签到结果,不能当成功
+        const dec = decryptGateway(data);
+        if (!dec.ok) {
+          return done("失败(响应解密失败,签到结果未确认,请打开 App 积分签到页核对)");
+        }
         acc.updatedAt = Date.now();
-        return done(null, decryptGateway(data));
+        return done(null, dec);
       }
       // 服务器对各类失败仍回明文"系统正忙";已签到则返回加密 102007(signAccount 中识别)
       if (n < MAX_RETRY) {
@@ -240,11 +250,28 @@ Author: ZahicX
 
   // 查询账号资料(c9/f03),成功回调 {nickname, mobileDst},失败回调 null
   function fetchUserInfo(acc, cb) {
-    if (!acc.user || !acc.user.data || !acc.user.skey) return cb(null);
+    if (!acc.user || !acc.user.data || !acc.user.skey) {
+      console.log("[SGCC debug] 资料: 未捕获 c9/f03 请求");
+      return cb(null);
+    }
     replayReq(acc, acc.user, (err, _resp, data) => {
-      if (err) return cb(null);
+      if (err) {
+        console.log(`[SGCC debug] 资料: 重放失败 ${err}`);
+        return cb(null);
+      }
       const dec = decryptGateway(data);
-      if (!dec.ok) return cb(null);
+      if (!dec.ok) {
+        console.log(`[SGCC debug] 资料: 解密失败, 原始响应前80字符=${String(data || "").slice(0, 80)}`);
+        return cb(null);
+      }
+      const keysOf = (v) =>
+        v && typeof v === "object" ? Object.keys(v).join(",") : String(typeof v);
+      const j = dec.json;
+      console.log(
+        `[SGCC debug] 资料结构: root=${keysOf(j)} | data=${keysOf(j && j.data)} | bizrt=${keysOf(
+          j && j.data && j.data.bizrt
+        )} | userInfo=${keysOf(j && j.data && j.data.bizrt && j.data.bizrt.userInfo)}`
+      );
       try {
         const u = dec.json.data.bizrt.userInfo;
         cb({
@@ -252,6 +279,7 @@ Author: ZahicX
           mobileDst: u.mobile_dst || null,
         });
       } catch (e) {
+        console.log(`[SGCC debug] 资料: 取 data.bizrt.userInfo 异常 ${e.message}`);
         cb(null);
       }
     });
@@ -420,11 +448,14 @@ Author: ZahicX
           // 重复签到: 服务端返回加密 102007「今日参与次数已用完」,确证今日已签
           already = true;
           result = `今日已签`;
-        } else if (rc != null && rc !== 1 && d.rtnMessage) {
-          result = `失败(${String(d.rtnMessage).slice(0, 40)})`;
-        } else {
+        } else if (rc === 1 || typeof d === "number") {
           signed = true;
           result = amount != null ? `签到成功, ${amount} 签到金` : `签到成功`;
+        } else if (d && d.rtnMessage) {
+          result = `失败(${String(d.rtnMessage).slice(0, 40)})`;
+        } else {
+          // 响应结构不认识时同样不能假定成功
+          result = "失败(响应格式未知,签到结果未确认,请打开 App 积分签到页核对)";
         }
       } else {
         result = err;
@@ -652,7 +683,8 @@ Author: ZahicX
   const SM2_P = 0xfffffffeffffffffffffffffffffffffffffffff00000000ffffffffffffffffn;
   const SM2_A = SM2_P - 3n;
   // 响应解密私钥: 客户端内置(所有安装共用),仅用于解密响应内容,非用户凭证
-  const SM2_PRIV = 0x2b7664aca72e7adc77b8e8e441ea7baa765fa070cfcdb81d0f280a2f397a9a02n;
+  // App 3.2.5 已轮换密钥,此值为 3.2.5 的 stringOpenPlatformPrId
+  const SM2_PRIV = 0x0f5299a36bf137a43f648747305aa990c93a7db67f9227c0a001a53634d319c1n;
 
   function normP(v) {
     v %= SM2_P;
@@ -734,8 +766,8 @@ Author: ZahicX
   const SM2_GY = 0xbc3736a2f4f6779c59bdcee36b692153d0a9877cc62a474002df32e52139f0a0n;
   const SM2_N = 0xfffffffeffffffffffffffffffffffff7203df6b21c6052b53bbf40939d54123n;
   const SM2_SRV_PUB = [
-    0x176976d8b4b3e0de348e6915a61b507844917a795a94ccf419809ed4ab459f0dn,
-    0xa73bf76fd297eff35e66f09f11a823da98f11190acc1f08fb7d4058b3b0ac79cn,
+    0xc990027d81c384e25219940baedf52a90eefb33fdd034c0bc94bc18cef0b83bcn,
+    0x12df7f3222d349bea5a257c0f3e480c2193758fcde2a023baf02e6488e3ea57bn,
   ];
 
   // 随机标量 k ∈ [1, n-1]
